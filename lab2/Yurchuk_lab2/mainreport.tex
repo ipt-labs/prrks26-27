@@ -1,0 +1,733 @@
+\section{Мета}
+\label{sec:objective}
+
+Метою цієї лабораторної роботи є дослідження архітектури та криптографічних механізмів IPsec, принципів встановлення 
+безпечних мережевих з’єднань, а також особливостей розгортання IPsec у різних мережевих сценаріях. Завдання, які 
+ставилися у роботі включають в себе аналіз основних протоколів IPsec (IKEv2, ESP, AH), розробку рішень для безпечного 
+підключення для п’яти практичних мережевих сценаріїв, детальне вивчення одного з них та порівняльний аналіз 
+IPsec/IKEv2 і WireGuard.
+
+\section{Архітектура та механізми IPsec}
+\label{sec:task1}
+
+\subsection*{Призначення IPsec та його місце в моделі мережі}
+
+IPsec (Internet Protocol Security) -- це набір протоколів, що забезпечує криптографічну безпеку -- конфіденційність, 
+цілісність, автентифікацію та захист від повторного відтворення — для трафіку на IP-layer traffic~\cite{rfc4301}. 
+Він працює мережевому (третьому) рівні моделі OSI, що означає, що він прозоро захищає трафік для всіх загроз, 
+розташованих вище над ним.
+
+Наприклад, коли IPsec налаштовано між двома шлюзами, кожна програма -- електронна пошта, веб, запити до баз даних 
+будуть захищатися автоматично, без будь-яких змін у самих програмах. Це принципово відрізняється від протоколу 
+TLS з першої лаби, який працює на транспортному/прикладнішому рівні та захищає лише конкретну програму, яка його 
+використовує.~\cite{cloudflare_ipsec}.
+
+\subsection*{Функції IKEv2 та ESP і їхня взаємодія}
+
+Сам протокол IPsec базується на двох протоколах, які виконують різні ролі~\cite{rfc7296, rfc4303}:
+
+\textbf{IKEv2} (Internet Key Exchange version~2) це \textit{протокол площини керування} (control-plane protocol). 
+Він працює через UDP-порти 500/4500 і відповідає за:
+\begin{itemize}
+    \item Взаємну автентифікацію двох однорангових вузлів (peers) за допомогою сертифікатів, pre-shared keys або 
+        методів EAP;
+    \item Узгодження криптографічних алгоритмів (шифрування, цілісність, Diffie-Helman group);
+    \item Виконання обміну ключами за алгоритмом Діффі–Хеллмана для отримання спільного секретного ключа;
+    \item Створення, оновлення ключів та видалення асоціацій безпеки (Security Associations, SAs).
+\end{itemize}
+
+\textbf{ESP} (Encapsulating Security Payload) — це \textit{протокол рівня даних} (data-plane protocol), IP protocol 
+number~50. Він приймає фактичний трафік користувача та:
+\begin{itemize}
+    \item Шифрує корисне навантаження за допомогою ключів, узгоджених за допомогою IKEv2 (наприклад, AES-256-GCM);
+    \item Аутентифікує кожен пакет за допомогою значення перевірки цілісності (integrity check value, ICV);
+    \item Забезпечує захист від повторного відтворення за допомогою вікна порядкових номерів.
+\end{itemize}
+
+Їхня взаємодія вібувається наступним чином. Спочатку запускається IKEv2 для встановлення безпечного каналу (IKE~SA), 
+а потім відбувається узгодження одного або декількох дочірніх SA. Кожен дочірній SA визначає параметри ESP 
+(алгоритм, ключі, селектори трафіку) для фактичного потоку даних. Коли термін дії ключів закінчується, IKEv2 
+виконує обмін ключами для генерації нових ключів без переривання трафіку. IKEv2 а-ля як "переговорник"{}, який 
+налаштовує захищений канал, а ESP -- "виконавець"{}, який фактично шифрує кожен пакет, що проходить через 
+нього~\cite{rfc6071, nist_sp800_77r1}.
+
+\subsection*{Асоціація безпеки (Security Association, SA)}
+
+Асоціація безпеки -- це одностороннє логічне з’єднання, яке містить усе необхідне для обробки захищеного трафіку 
+в одному напрямку~\cite{rfc4301}. SA характеризується:
+\begin{itemize}
+    \item \textbf{SPI} (Security Parameters Index) -- 32-бітний ідентифікатор, що міститься в кожному заголовку 
+        ESP;
+    \item \textbf{Destination IP address} -- разом із SPI однозначно ідентифікує SA;
+    \item \textbf{Protocol} -- ESP (або AH);
+    \item \textbf{Cryptographic parameters} -- алгоритм, ключ, довжина вектора ініціалізації (IV), термін дії;
+    \item \textbf{Mode} -- транспортний або тунельний;
+    \item \textbf{Anti-replay window} стан.
+\end{itemize}
+
+Оскільки SA є однонаправленим, то для двостороннього обміну даними потрібно \textbf{щонайменше два SA} -- по одному 
+для кожного напрямку. На практиці IKEv2 створює пару дочірніх SA (один вхідний, один вихідний) для кожного захищеного 
+потоку даних. Сам IKE~SA (використовується для керуючих повідомлень IKEv2) є окремим двонаправленим SA, тому типова 
+сесія IPsec використовує щонайменше три SA загалом~\cite{rfc7296}.
+
+\subsection*{Бази даних SPD та SAD.}
+
+IPsec використовує дві бази даних на кожному хості/шлюзі~\cite{rfc4301}:
+
+\textbf{SPD} (Security Policy Database) -- це \textit{policy table}. Для кожного пакета спочатку йде звернення 
+до SPD, і таблиця надсилає відповідь: "Що має статися з цим трафіком?"{}. Далі кожен запис зіставляється за 
+селекторами (IP-адреса джерела/призначення, порт, протокол) і визначається одна з трьох дій: \textsc{Protect} 
+(застосувати IPsec), \textsc{Bypass} (надіслати у вигляді відкритого тексту) або \textsc{Discard} (відкинути). 
+
+\textbf{SAD} (Security Association Database) -- це \textit{state table}. У ній зберігаються активні SA, тобто 
+фактичні ключі, алгоритми, SPI, лічильники послідовностей, які ESP використовує для шифрування та дешифрування 
+пакетів. Коли SPD вказує "захистити"{}(protect), система шукає відповідну SA в SAD. Якщо SA не існує, система 
+запускає IKEv2 для її створення. Коротше кажучи: SPD визначає, \textbf{що} захищати; SAD містить інформацію про 
+те, \textbf{як} це робити~\cite{nist_sp800_77r1}.
+
+\subsection*{Transport vs.\ tunnel mode}
+
+У \textbf{Transport mode} шифрується лише корисне навантаження (payload) IP (заголовок TCP/UDP + дані), а 
+оригінальний заголовок IP залишається незмінним~\cite{rfc4303}. Структура пакета стає такою:
+
+\noindent\texttt{[Original IP Header][ESP Header][Encrypted Payload][ESP Trailer][ICV]}
+
+Типове використання цього, це наскрізний захист між двома хостами, що безпосередньо взаємодіють, наприклад, двома
+серверами в одній мережі, які обмінюються конфіденційними записами бази даних.
+
+У \textbf{Tunnel mode} шифрується весь оригінальний IP-пакет (заголовок + корисне навантаження) і обгортається 
+новим IP-заголовком~\cite{rfc4303}:
+
+\noindent\texttt\scriptsize{[New IP Header][ESP Header][Encrypted: Original IP + Payload][ESP Trailer][ICV]}
+
+Типове застосування: site-to-site VPNs між шлюзами. Внутрішні IP-адреси (приватні LAN адреси) приховані всередині 
+зашифрованого тунелю, а зовнішній заголовок містить "gateway-to-gateway"{} адреси. Зовнішній спостерігач бачить 
+лише IP-адреси шлюзів і не може визначити, які внутрішні хости взаємодіють між собою.
+
+\subsection*{AH vs.\ ESP і чому використання ESP домінує}
+
+\textbf{AH} (Authentication Header, IP protocol~51) заголовок автентифікації забезпечує цілісність та автентифікацію 
+всього IP-пакета, включаючи частини \textbf{зовнішнього} IP-заголовка, але \textbf{нічого не шифрує}~\cite{rfc4302}.
+
+\textbf{ESP} забезпечує як шифрування, так і цілісність/автентифікацію корисного навантаження. Завдяки сучасним 
+алгоритмам AEAD (AES-GCM, ChaCha20-Poly1305) ESP виконує обидві функції в рамках однієї операції~\cite{rfc4303}.
+
+\noindent ESP значною мірою замінив AH з трьох причин~\cite{nist_sp800_77r1}:
+
+\begin{enumerate}
+    \item ESP забезпечує конфіденційність, чого не може зробити AH;
+    \item ESP з алгоритмами AEAD забезпечує цілісність корисного навантаження, порівнянну з AH;
+    \item AH перевіряє на автентичність змінні поля IP-заголовка (наприклад, TTL), що спричиняє проблеми перевірки 
+        NAT--AH цілісності, коли NAT модифікує IP-заголовок, що робить AH несумісним із середовищами NAT.
+\end{enumerate}
+
+\subsection*{NAT і NAT Traversal (NAT-T)}
+
+\textbf{NAT} (Network Address Translation) змінює IP-заголовки та номери портів під час проходження пакетів через
+пристрій NAT. Це створює дві проблеми для IPsec~\cite{rfc3948}:
+
+\begin{enumerate}
+    \item ESP це IP-level protocol (protocol number~50) без номерів портів TCP/UDP. Багато пристроїв NAT не можуть 
+        відстежувати потоки ESP, оскільки вони покладаються на номери портів для розрізнення з’єднань;
+    \item Навіть якщо NAT може пропускати ESP, модифікація заголовка IP робить перевірки цілісності AH недійсними 
+        та порушує обчислення хеш-сум IKE (hash calculations).
+\end{enumerate}
+
+\textbf{NAT-T} (NAT Traversal, RFC~3948)~\cite{rfc3948} вирішує цю проблему таким чином:
+1. 
+2. Коли NAT виявлено, обидва вузли переходять з UDP 500 на UDP 4500.
+3. Кожен пакет ESP упаковується в датаграм UDP 4500: [IP][UDP:4500][ESP][Корисне навантаження].
+Тепер пристрій NAT може відстежувати потік за допомогою порту UDP, а вихідний пакет ESP надходить
+без змін.
+Цей механізм є повністю прозорим — IKEv2 автоматично виявляє та вмикає NAT-T без ручного
+налаштування [3].
+
+\begin{enumerate}
+    \item Під час узгодження IKEv2 обидва вузли надсилають дані для виявлення NAT (hashes of IP:port). 
+        Якщо хеші не збігаються, це означає наявність NAT;
+    \item Коли NAT виявлено, обидва вузли переходять з UDP 500 на UDP 4500;
+    \item Кожен пакет ESP загортається в UDP~4500 датаграму:
+        \texttt{[IP][UDP:4500][ESP][Payload]}. Тепер пристрій NAT може відстежувати потік за допомогою порту 
+        UDP, а вихідний пакет ESP надходить без змін.
+\end{enumerate}
+
+Цей механізм є повністю прозорим -- IKEv2 автоматично виявляє та вмикає NAT-T без додаткового ручного налаштування~\cite{rfc7296}.
+
+\subsection*{Perfect Forward Secrecy (PFS) в IPsec.}
+
+У контексті IPsec, PFS означає, що ключі, які використовуються для захисту певної сесії передачі даних, неможливо 
+вивести з ключів, що використовуються в будь-якій іншій сесії, навіть якщо довгостроковий ключ автентифікації 
+(приватний ключ сертифіката або PSK) згодом буде скомпрометований~\cite{rfc7296}. Без ідеальної повної/прямої 
+секретності (PFS) зловмисник, який отримав довгостроковий ключ, потенційно може вивести всі сесійні ключі з 
+записаних IKE exchanges та розшифрувати весь минулий і майбутній трафік.
+
+Коли PFS увімкнений, IKEv2 виконує новий обмін за алгоритмом Діффі–Хеллмана для кожної перегенерації ключа (rekey) 
+для дочірнього SA. Навіть якщо довгостроковий ключ буде скомпрометований, значення DH кожного сеансу є короткочасними 
+і вже видаленими, тому минулий трафік залишається захищеним. Увімкнення PFS збільшує обчислювальні витрати (один 
+додатковий обмін DH на кожну перегенерацію ключа), але ці витрати є незначними при використання сучасного апаратного 
+забезпечення і рекомендуються NIST (The National Institute of Standards and Technology)~\cite{nist_sp800_77r1}.
+
+\section{Сценарії деплою IPsec}
+\label{sec:task2}
+
+\textbf{Сценарій 1: Site-to-site connection (два офіси).}
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{tikzpicture}[
+            node distance=1.2cm and 2cm,
+            host/.style={draw, rounded corners, minimum width=1.4cm,
+                    minimum height=0.7cm, font=\scriptsize\sffamily,
+                    fill=blue!8},
+            gw/.style={draw, thick, minimum width=1.6cm,
+                    minimum height=0.8cm, font=\scriptsize\sffamily\bfseries,
+                    fill=orange!15},
+            cloud/.style={draw, ellipse, minimum width=2.4cm,
+                    minimum height=1cm, font=\scriptsize\sffamily,
+                    fill=gray!10},
+            net/.style={draw, dashed, rounded corners,
+                    inner sep=8pt, gray!60},
+        ]
+        % LAN A
+        \node[host] (h1) {PC-A1};
+        \node[host, below=0.5cm of h1] (h2) {PC-A2};
+        \node[gw, right=1.5cm of $(h1)!0.5!(h2)$] (gw1) {Gateway A};
+        \node[net, fit=(h1)(h2),
+            label={[font=\scriptsize]above:LAN A (10.1.0.0/16)}] {};
+
+        % Internet
+        \node[cloud, right=2cm of gw1] (inet) {Internet};
+
+        % LAN B
+        \node[gw, right=2cm of inet] (gw2) {Gateway B};
+        \node[host, right=1.5cm of gw2, yshift=0.35cm] (h3) {PC-B1};
+        \node[host, below=0.5cm of h3] (h4) {PC-B2};
+        \node[net, fit=(h3)(h4),
+            label={[font=\scriptsize]above:LAN B (10.2.0.0/16)}] {};
+
+        % Connections
+        \draw[thick] (h1.east) -- (gw1.west);
+        \draw[thick] (h2.east) -- (gw1.west);
+        \draw[thick] (gw1) -- (inet);
+        \draw[thick] (inet) -- (gw2);
+        \draw[thick] (gw2.east) -- (h3.west);
+        \draw[thick] (gw2.east) -- (h4.west);
+
+        % IPsec tunnel
+        \draw[very thick, red!70, densely dashed]
+        (gw1.north) to[bend left=25]
+        node[above, font=\scriptsize\sffamily, text=red!70!black]
+        {IPsec Tunnel (ESP)} (gw2.north);
+    \end{tikzpicture}
+    \caption{Scenario 1: Site-to-site IPsec VPN}
+    \label{fig:s2s}
+\end{figure}
+
+\textbf{Кінцеві точки IPsec}: Шлюзи~A та B (gateway) (крайні маршрутизатори/брандмауери кожного офісу).
+
+\textbf{Режим (Mode)}: Tunnel mode -- шлюзи інкапсулюють цілі пакети локальної мережі всередині тунелю IPsec, 
+приховуючи внутрішні адреси від Інтернету
+
+\textbf{Захищений трафік}: Весь IP-трафік між підмережами 10.1.0.0/16 та 10.2.0.0/16.
+
+\textbf{Обґрунтування}: Tunnel mode між шлюзами є стандартною "site-to-site"{} VPN схемою, оскільки на окремих 
+робочих станціях не потрібно встановлювати програмне забезпечення — шлюзи прозоро обробляють шифрування. 
+Внутрішні хости не знають, що використовується IPsec~\cite{rfc4301, nist_sp800_77r1}.
+
+\bigskip
+\noindent\textbf{Сценарій 2: Віддалений працівник.}
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{tikzpicture}[
+            host/.style={draw, rounded corners, minimum width=1.6cm,
+                    minimum height=0.7cm, font=\scriptsize\sffamily,
+                    fill=blue!8},
+            gw/.style={draw, thick, minimum width=1.6cm,
+                    minimum height=0.8cm, font=\scriptsize\sffamily\bfseries,
+                    fill=orange!15},
+            cloud/.style={draw, ellipse, minimum width=2.4cm,
+                    minimum height=1cm, font=\scriptsize\sffamily,
+                    fill=gray!10},
+            net/.style={draw, dashed, rounded corners,
+                    inner sep=8pt, gray!60},
+        ]
+        % Remote worker
+        \node[host, fill=green!10] (laptop) {Laptop};
+        \node[font=\scriptsize\sffamily, below=2pt of laptop]
+        {IPsec client};
+
+        % NAT
+        \node[draw, right=1.2cm of laptop, minimum width=1cm,
+            minimum height=0.6cm, font=\scriptsize\sffamily,
+            fill=yellow!15] (nat) {NAT};
+
+        % Internet
+        \node[cloud, right=1.5cm of nat] (inet) {Internet};
+
+        % Office
+        \node[gw, right=1.5cm of inet] (gw) {VPN Gateway};
+        \node[host, right=1.2cm of gw, yshift=0.35cm] (srv1) {Server 1};
+        \node[host, below=0.5cm of srv1] (srv2) {Server 2};
+        \node[net, fit=(srv1)(srv2),
+            label={[font=\scriptsize]above:Office LAN}] {};
+
+        % Connections
+        \draw[thick] (laptop) -- (nat);
+        \draw[thick] (nat) -- (inet);
+        \draw[thick] (inet) -- (gw);
+        \draw[thick] (gw.east) -- (srv1.west);
+        \draw[thick] (gw.east) -- (srv2.west);
+
+        % IPsec tunnel
+        \draw[very thick, red!70, densely dashed]
+        (laptop.north) to[bend left=20]
+        node[above, font=\scriptsize\sffamily, text=red!70!black]
+        {IPsec Tunnel (ESP + NAT-T)} (gw.north);
+    \end{tikzpicture}
+    \caption{Scenario 2: Remote worker VPN}
+    \label{fig:remote}
+\end{figure}
+
+\textbf{Кінцеві точки IPsec}: ноутбук співробітника (програмне забезпечення клієнта IPsec, наприклад, 
+strongSwan built-in OS client) та gateway VPN в офісі.
+
+\textbf{Режим (Mode)}: Tunnel mode. Весь вихідний пакет шифрується, завдяки чому внутрішні адреси приховуються, 
+а ноутбук виглядає як частина офісної локальної мережі.
+
+\textbf{Захищений трафік}: Весь трафік з ноутбука, призначений для офісної мережі (або весь трафік, якщо роздільне
+тунелювання вимкнено) є захищеним.
+
+\textbf{Обґрунтування}: Співробітник підключається з ненадійної публічної мережі, найбільш ймовірно, що через домашній 
+маршрутизатор, що використовує NAT. IKEv2 автоматично виявляє NAT і вмикає NAT-T (інкапсуляція UDP 4500). Ноутбук 
+проходить автентифікацію за допомогою сертифіката або облікових даних EAP і отримує віртуальну IP-адресу з 
+офісної підмережі~\cite{rfc7296, rfc3948}. Вуаля і все чудово)
+
+\bigskip
+\noindent\textbf{Сценарій 3: Два сервери (host-to-host).}
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{tikzpicture}[
+            host/.style={draw, rounded corners, minimum width=1.8cm,
+                    minimum height=0.8cm, font=\scriptsize\sffamily,
+                    fill=blue!8},
+        ]
+        \node[host, fill=green!10] (s1) {Server A};
+        \node[draw, ellipse, right=4cm of s1, minimum width=2.4cm,
+            minimum height=1cm, font=\scriptsize\sffamily,
+            fill=gray!10] (net) {Untrusted Network};
+        \node[host, fill=green!10, right=4cm of net] (s2) {Server B};
+
+        \draw[thick] (s1) -- (net);
+        \draw[thick] (net) -- (s2);
+
+        % IPsec
+        \draw[very thick, red!70, densely dashed]
+        (s1.north) to[bend left=20]
+        node[above, font=\scriptsize\sffamily, text=red!70!black]
+        {IPsec Transport (ESP)} (s2.north);
+    \end{tikzpicture}
+    \caption{Scenario 3: Host-to-host IPsec (transport mode)}
+    \label{fig:h2h}
+\end{figure}
+
+\textbf{Кінцеві точки IPsec}: Безпоседеньо сервери~A та сервер~B. 
+
+Режим: транспортний режим — обидва сервери
+мають маршрутизовані IP-адреси та спілкуються безпосередньо, тому немає потреби в інкапсуляції IP-заголовка.
+Транспортний режим створює менше навантаження. Захищений трафік: весь трафік між IP-адресами двох
+серверів (або певною підмножиною протоколів/портів, визначеною в SPD). Обґрунтування: оскільки обидві
+кінцеві точки є фактичними хостами, що взаємодіють (без шлюзу між ними), транспортний режим є природним і
+більш ефективним вибором. Він шифрує корисне навантаження, зберігаючи оригінальний IP-заголовок, що
+дозволяє стандартним політикам маршрутизації та QoS працювати нормально
+
+\textbf{Режим (Mode)}: Transport mode -- обидва сервери мають маршрутизовані IP-адреси та спілкуються безпосередньо, 
+тому немає потреби в додатковій інкапсуляції IP-заголовка. Плюч Транспортний режим створює менше навантаження.
+
+\textbf{Захищений трафік}: Весь трафік між IP-адресами двох серверів (або певною підмножиною протоколів/портів, 
+задекларованою в SPD).
+
+\textbf{Обґрунтування}: Оскільки обидві кінцеві точки є фактичними хостами, що взаємодіють (no gateway між ними), 
+транспортний режим є природним і більш ефективним вибором. Він шифрує корисне навантаження, зберігаючи оригінальний 
+IP-заголовок, що дозволяє стандартним політикам маршрутизації та QoS працювати нормально~\cite{rfc4301}.
+
+\bigskip
+\noindent\textbf{Сценарій 4: Hub-and-spoke (HQ + multiple branches).} Так звана "зірка"{} -- (головний офіс і 
+кілька філій)
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{tikzpicture}[
+            gw/.style={draw, thick, minimum width=1.5cm,
+                    minimum height=0.7cm, font=\scriptsize\sffamily\bfseries,
+                    fill=orange!15},
+            cloud/.style={draw, ellipse, minimum width=2.6cm,
+                    minimum height=1.2cm, font=\scriptsize\sffamily,
+                    fill=gray!10},
+            net/.style={draw, dashed, rounded corners, inner sep=5pt,
+                    gray!60, font=\scriptsize\sffamily},
+        ]
+        % Internet
+        \node[cloud] (inet) {Internet};
+
+        % HQ
+        \node[gw, above=1.8cm of inet] (hq) {HQ Gateway};
+        \node[net, above=0.3cm of hq, minimum width=2.5cm]
+        (hqlan) {HQ LAN};
+
+        % Branches
+        \node[gw, below left=1.8cm and 2.5cm of inet] (br1)
+        {Branch 1 GW};
+        \node[net, below=0.3cm of br1, minimum width=2cm]
+        (b1lan) {Branch 1 LAN};
+
+        \node[gw, below=1.8cm of inet] (br2) {Branch 2 GW};
+        \node[net, below=0.3cm of br2, minimum width=2cm]
+        (b2lan) {Branch 2 LAN};
+
+        \node[gw, below right=1.8cm and 2.5cm of inet] (br3)
+        {Branch 3 GW};
+        \node[net, below=0.3cm of br3, minimum width=2cm]
+        (b3lan) {Branch 3 LAN};
+
+        % Lines to internet
+        \draw[thick] (hq) -- (inet);
+        \draw[thick] (br1) -- (inet);
+        \draw[thick] (br2) -- (inet);
+        \draw[thick] (br3) -- (inet);
+
+        % IPsec tunnels (dashed red lines)
+        \draw[very thick, red!70, densely dashed]
+        (hq.south west) to[bend right=10]
+        node[left, font=\scriptsize\sffamily,
+            text=red!70!black, pos=0.3] {ESP}
+        (br1.north);
+
+        \draw[very thick, red!70, densely dashed]
+        (hq.south) to
+        node[right, font=\scriptsize\sffamily,
+            text=red!70!black, pos=0.3] {ESP}
+        (br2.north);
+
+        \draw[very thick, red!70, densely dashed]
+        (hq.south east) to[bend left=10]
+        node[right, font=\scriptsize\sffamily,
+            text=red!70!black, pos=0.3] {ESP}
+        (br3.north);
+    \end{tikzpicture}
+    \caption{Scenario 4: Hub-and-spoke IPsec topology}
+    \label{fig:hub_spoke}
+\end{figure}
+
+\textbf{Кінцеві точки IPsec}: Шлюз штаб-квартири (HQ gateway) виконує роль хаба, в той час як кожен шлюз філії 
+встановлює окремий тунель до шлюзу штаб-квартири.
+
+\textbf{Режим (Mode)}: Tunnel mode на кожному каналі -- кожен шлюз філії інкапсулює свій трафік локальної мережі, 
+призначений для штаб-квартири (або іншої філії, маршрутизований через штаб-квартиру).
+
+\textbf{Захищений трафік}: Трафік між підмережею кожного філіалу та підмережею штаб-квартири. Трафік між 
+філіалами (Inter-branch) проходить через концентратор у штаб-квартирі (HQ hub)
+
+\textbf{Обґрунтування}: Дана модель добре масштабується для організацій із великою кількістю філіалів -- кожному 
+філіалу потрібна лише одна конфігурація тунелю (до штаб-квартири), а шлюз штаб-квартири обробляє маршрутизацію 
+між філіалами. Це є стандартною архітектурою корпоративної VPN~\cite{nist_sp800_77r1}.
+
+\bigskip
+\noindent\textbf{Сценарій 5: Локальна мережа (LAN) і хмарна інфраструктура.}
+
+\begin{figure}[!htbp]
+    \centering
+    \begin{tikzpicture}[
+            host/.style={draw, rounded corners, minimum width=1.4cm,
+                    minimum height=0.7cm, font=\scriptsize\sffamily,
+                    fill=blue!8},
+            gw/.style={draw, thick, minimum width=1.5cm,
+                    minimum height=0.7cm, font=\scriptsize\sffamily\bfseries,
+                    fill=orange!15},
+            cloud/.style={draw, ellipse, minimum width=2.4cm,
+                    minimum height=1cm, font=\scriptsize\sffamily,
+                    fill=gray!10},
+            cld/.style={draw, rounded corners, minimum width=1.4cm,
+                    minimum height=0.7cm, font=\scriptsize\sffamily,
+                    fill=cyan!8},
+            net/.style={draw, dashed, rounded corners,
+                    inner sep=8pt, gray!60},
+        ]
+        % On-prem
+        \node[host] (h1) {Workstation};
+        \node[host, below=0.5cm of h1] (h2) {DB Server};
+        \node[gw, right=1.5cm of $(h1)!0.5!(h2)$] (gw1) {On-prem GW};
+        \node[net, fit=(h1)(h2),
+            label={[font=\scriptsize]above:On-premises LAN}] {};
+
+        % Internet
+        \node[cloud, right=2cm of gw1] (inet) {Internet};
+
+        % Cloud
+        \node[gw, right=2cm of inet, fill=cyan!20] (cgw) {Cloud VPN GW};
+        \node[cld, right=1.2cm of cgw, yshift=0.35cm] (vm1) {VM / App};
+        \node[cld, below=0.5cm of vm1] (vm2) {Cloud DB};
+        \node[net, fit=(vm1)(vm2),
+            label={[font=\scriptsize]above:Cloud VPC}] {};
+
+        % Lines
+        \draw[thick] (h1.east) -- (gw1.west);
+        \draw[thick] (h2.east) -- (gw1.west);
+        \draw[thick] (gw1) -- (inet);
+        \draw[thick] (inet) -- (cgw);
+        \draw[thick] (cgw.east) -- (vm1.west);
+        \draw[thick] (cgw.east) -- (vm2.west);
+
+        % Tunnel
+        \draw[very thick, red!70, densely dashed]
+        (gw1.north) to[bend left=25]
+        node[above, font=\scriptsize\sffamily, text=red!70!black]
+        {IPsec Tunnel (ESP)} (cgw.north);
+    \end{tikzpicture}
+    \caption{Scenario 5: On-premises to cloud IPsec VPN}
+    \label{fig:cloud}
+\end{figure}
+
+\textbf{Кінцеві точки IPsec}: Шлюз локальної мережі (on-premises network gateway) та шлюз VPN хмарного провайдера 
+(наприклад, AWS VPN Gateway, Azure VPN Gateway, тощо).
+
+\textbf{Режим (Mode)}: Tunnel mode ідентичний до site-to-site VPN, де хмарна VPC виступає в ролі віддаленої сторони.
+
+\textbf{Захищений трафік}: Весь трафік між локальною підмережею та підмережею хмарної VPC.
+
+\textbf{Обґрунтування}: Основні хмарні провайдери (AWS, Azure, GCP) пропонують керовані шлюзи IPsec VPN, які заміняють 
+стандартні тунелі IKEv2/ESP~\cite{aws_vpn_docs, azure_vpn_docs}. Це дозволяє організаціям розширювати свою 
+приватну мережу в хмару без винесення даних у загальнодоступний Інтернет. Ця конфігурація по суті є VPN site-to-site 
+VPN, де однією зі сторін виступає хмарна VPC.
+
+\section{Детальний аналіз сценарію віддаленої роботи}
+\label{sec:task3}
+
+Я для себе обрав другий сценарій (малюнок~\ref{fig:remote}) для поглибленого аналізу -- віддалений співробітник 
+підключається з публічної мережі до офісної LAN-мережі через IPsec. Як на мене, дуже актуальний варіант)
+
+\textbf{1. Вибір режиму з'єднання: tunnel або transport.}
+
+\textbf{Tunnel mode} Буде правильним вибором, оскільки ноутбук віддаленого співробітника має публічну (або 
+NAT-адресу) IP-адресу, яка не входить до офісної мережі. Щоб отримати доступ до внутрішніх ресурсів (файлових 
+серверів, баз даних), ноутбук повинен виглядати так, ніби він знаходиться в офісній локальній мережі. Тунельний 
+режим дозволяє це зробити: вихідний пакет (з віртуальною офісною IP-адресою як джерелом) інкапсулюється у 
+зовнішній пакет (з реальною IP-адресою ноутбука). VPN-шлюз декапсулює пакет і пересилає його в офісну LAN-мережу 
+з віртуальною адресою джерела~\cite{rfc4301}. Транспортний режим тут не підійде, оскільки він зберігатиме оригінальний 
+IP-заголовок -- публічна IP-адреса ноутбука буде адресою джерела, яку офісна мережа не розпізнає.
+
+\textbf{2. Асоціації безпеки.}
+
+Між ноутбуком та шлюзом VPN встановлюються наступні асоціації безпеки (SA)~\cite{rfc7296}:
+
+\begin{enumerate}
+    \item \textbf{IKE SA} (двонаправлена): Захищає control-plane messages IKEv2. 
+        Встановлюється під час \\ \texttt{IKE\_SA\_INIT} і \texttt{IKE\_AUTH}.
+    \item \textbf{Дочірня SA---outbound}: Створюється при \texttt{IKE\_AUTH}. 
+        Використовується ноутбуком для шифрування трафіку, що надсилається до офісу. Ідентифікується за допомогою 
+        SPI, обраного шлюзом VPN.
+    \item \textbf{Дочірня SA---inbound}: Відповідна SA у зворотному напрямку, яка використовується шлюзом VPN 
+    для шифрування трафіку, що надсилається \textit{до} ноутбука. Ідентифікується за допомогою SPI, обраного ноутбуком.
+\end{enumerate}
+
+Якщо працівнику потрібно отримати доступ до декількох підмереж із різними політиками безпеки, тоді необхідні додаткові 
+пари дочірніх SA, що можуть бути створені за допомогою обмінів \texttt{CREATE\_CHILD\_SA}.
+
+\textbf{3. Роль IKEv2.}
+
+У цьому сценарії IKEv2 виконує такі кроки~\cite{rfc7296}:
+
+\begin{enumerate}
+    \item \texttt{IKE\_SA\_INIT} (2 повідомлення): ноутбук і шлюз VPN обмінюються відкритими значеннями DH та
+        одноразовими числами (nonces). Вони узгоджують криптографічні алгоритми для IKE SA. Включено корисні 
+        дані для виявлення NAT.
+    \item \texttt{IKE\_AUTH} (2 зашифровані повідомлення): Ноутбук проходить автентифікацію (за допомогою 
+        сертифіката, EAP, або PSK). Шлюз проходить автентифікацію за допомогою свого сертифіката. Проводиться 
+        узгодження селекторів трафіку (які підмережі охоплює тунель). Створюється перша пара дочірніх SA. Ноутбуку 
+        присвоюється віртуальна IP-адреса (дані конфігурації - (Configuration Payload).
+    \item \texttt{CREATE\_CHILD\_SA} (за потреби): Перегенерація ключів IKE~SA або дочірніх (Child~SAs) після 
+    закінчення терміну їх дії. Застосовується PFS шляхом виконання нового обміну DH.
+\end{enumerate}
+
+\textbf{4. Функції ESP.}
+
+У цьому випадку ESP виконує~\cite{rfc4303}:
+\begin{itemize}
+    \item \textbf{Шифрування (Encryption)}: Кожен IP-пакет з ноутбука шифрується за узгодженим алгоритмом 
+        (наприклад, AES-256-GCM), що запобігає прочитанню трафіку будь-ким у публічній мережі (Wi-Fi у кав’ярні, 
+        провайдер (ISP)).
+    \item \textbf{Цілісність та автентифікація}: Кожен пакет ESP містить ICV (Integrity Check Value -- значення 
+        перевірки цілісності), обчислене на основі зашифрованого корисного навантаження та заголовка ESP 
+        (Encapsulating Security Payload). Будь-яке втручання виявляється, і пакет відкидається.
+    \item \textbf{Захист від повторного відтворення (Anti-replay)}: Sliding window порядкових номерів не дозволяє 
+        зловмиснику перехоплювати та повторно відтворювати старі пакети.
+    \item \textbf{Інкапсуляція} (tunnel mode): Весь оригінальний пакет інкапсулюється (wrapped), приховуючи від 
+        публічної мережі внутрішні IP-адреси, номери портів і навіть тип використовуваного протоколу.
+\end{itemize}
+
+\textbf{5. Що видно зовнішньому спостерігачеві?}
+
+\begin{table}[!htbp]
+    \centering
+    \begin{tblr}{
+            colspec = {X[2,l] X[1,c]},
+            row{1} = {font=\bfseries\small, bg=gray!15},
+            hlines, vlines,
+            rowsep = 3pt,
+        }
+        Інформація                            & Доступно? \\
+        Публічна IP-адреса ноутбука             & Так      \\
+        Публічна IP-адреса шлюзу VPN        & Так      \\
+        Використовується IPsec/ESP (протокол 50 або UDP 4500)                           & Так      \\
+        Обсяг трафіку (розмір пакету)       & Так      \\
+        Часові параметри пакетів                     & Так      \\
+        Внутрішня (віртуальна) IP-адреса ноутбука    & Ні       \\
+        IP-адреса призначення офісних серверів       & Ні       \\
+        Application протокол (HTTP, SSH, etc.) & Ні       \\
+        Зміст корисного навантаження                       & Ні       \\
+        Номери портів TCP/UDP                   & Ні       \\
+    \end{tblr}
+    \caption{Видимість інформації для стороннього спостерігача}
+    \label{tab:visibility}
+\end{table}
+
+Підсумовуючи, спостерігач знає, що \textit{ноутбук взаємодіє} з шлюзом VPN і може оцінити, \textit{який обсяг даних} 
+передається, але не може визначити, \textit{до чого здійснюється доступ} або \textit{який саме цей вміст}~\cite{rfc4303}.
+
+\textbf{6. NAT та NAT-T.}
+
+У цьому сценарії \textbf{найблільш ймовірне використання NAT} -- віддалений працівник майже напевно підключається через 
+домашній маршрутизатор або мобільний хотспот, який використовує NAT (Network Address Translation).
+
+Тому NAT-T (NAT Traversal) є необхідним. Як я згадував вже в розділі~\ref{sec:task1}, IKEv2 автоматично виявляє NAT 
+під час \texttt{IKE\_SA\_INIT} і перемикається на інкапсуляцію UDP~4500~\cite{rfc3948}. Цей процес є видним для 
+користувача. Без NAT-T пакети ESP (протокол IP~50) або відкидалися б NAT-пристроєм (який не може призначити 
+відображення портів для протоколу, що не є TCP/UDP), або порушувалися б, якщо кілька співробітників за одним і 
+тим же NAT намагаються підключитися одночасно (виникали SPI колізії).
+
+\textbf{7. Загрози, які усуваються і не усуваються IPsec.}
+
+\textit{Загрози, які усуваються IPsec:}
+\begin{itemize}
+    \item \textbf{Прослуховування} в публічних мережах Wi-Fi або на каналах інтернет-провайдера -- шифрування 
+        ESP унеможливлює зчитування трафіку зловмисником;
+    \item \textbf{Фальсифікація пакетів} -- перевірки цілісності ESP виявляють і відхиляють змінені пакети;
+    \item \textbf{Атаки повторного відтворення} -- вікно захисту від повторного відтворення (anti-replay window) 
+        відхиляє старі пакети;
+    \item \textbf{IP spoofing (підробка)} -- шлюз VPN приймає пакети \textit{лише від автентифікованих} однорангових 
+        вузлів IPsec;
+    \item \textbf{Несанкціонований доступ до мережі} -- лише автентифіковані користувачі з дійсними обліковими 
+        даними можуть встановити з'єднання.
+\end{itemize}
+
+\textit{Загрози, які не усуваються IPsec:}
+\begin{itemize}
+    \item \textbf{Compromised endpoint} -- якщо сам ноутбук заражений шкідливим програмним забезпеченням 
+        (скомпроментований), IPsec захищає мережевий канал, але зловмисник уже має доступ до відкритого тексту на 
+        кінцевому пристрої;
+    \item \textbf{Application-layer атаки} -- SQL-ін'єкція, XSS, фішинг відбуваються вище мережевого рівня і є 
+        невидимими для IPsec;
+    \item \textbf{Аналіз трафіку} -- спостерігач все ще може бачити розміри пакетів та часові закономірності, 
+        що може розкрити моделі використання;
+    \item \textbf{Відмова в обслуговуванні} -- IPsec не запобігає об’ємним DDoS-атакам;
+    \item \textbf{Крадіжка облікових даних} -- якщо облікові дані користувача для VPN вже викрадено (phishing, 
+        keylogger), IPsec не може відрізнити законного користувача від зловмисника, який використовує ці дійсні 
+        облікові дані~\cite{nist_sp800_77r1}.
+\end{itemize}
+
+\section{Порівняння IPsec/IKEv2 vs.\ WireGuard}
+\label{sec:task4}
+
+\begin{table}[!htbp]
+    \centering
+    \begin{tblr}{
+            colspec = {X[1.3,l] X[1.2,l] X[1.2,l]},
+            row{1} = {font=\bfseries\small, bg=gray!15},
+            hlines, vlines,
+            rowsep = 4pt,
+        }
+        Критерій & IPsec/IKEv2 & WireGuard \\
+        %
+        Архітектура 
+            & Складна, модульна: IKEv2 (управління) + ESP (дані), окремі SPD/SAD бази даних
+            & Мінімалістична: єдиний протокольний рівень. близько 5к рядків коду ядра \\
+        %
+        Встановлення ключів 
+            & IKEv2: certificates, PSK, EAP; повне узгодження з життєвим циклом SA 
+            & Статичні відкриті ключі обмінюються позаканально (out-of-band); 1-RTT Noise IK рукостискання \\
+        %
+        Криптографічні алгоритми 
+            & На вибір: AES-GCM, AES-CBC, ChaCha20, SHA-256/384/512, DH groups 14--21 
+            & Фіксовані: ChaCha20-Poly1305, Curve25519, BLAKE2s, SipHash, HKDF \\
+        %
+        Вибір алгоритму 
+            & Повна гнучкість: однорангові вузли узгоджують набори з-поміж запропонованих 
+            & Без узгодження: зміна версії протоколу тягне за собою зміну шифрування \\
+        %
+        NAT traversal 
+            & NAT-T виявлено автоматично; UDP~4500 інкапсуляція~\cite{rfc3948} 
+            & Native: завжди працює через UDP; NAT є прозорим \\
+        %
+        Складність конфігурації 
+            & Висока: багато опцій, правила (policies), перетворення (transforms), сертифікати PKI 
+            & Низька: одна пара ключів + конфігурація однорангового вузла на кожен вузол; мін. конфігураційний файл \\
+        %
+        Типові сценарії використання 
+            & Міжкорпоративні з'єднання site-to-site, віддалений доступ, cloud connectivity, дотримання нормативних вимог 
+            & Однорангові тунелі, особисті VPN, мережеві контейнери, overlay networks \\
+    \end{tblr}
+    \caption{IPsec/IKEv2 vs WireGuard}
+    \label{tab:comparison}
+\end{table}
+
+\textbf{Придатність до сценаріїв із розділу~\ref{sec:task2}:}
+
+\begin{table}[!htbp]
+    \centering
+    \begin{tblr}{
+            colspec = {X[0.4,c] X[1.5,l] X[0.8,c] X[2,l]},
+            row{1} = {font=\bfseries\small, bg=gray!15},
+            hlines, vlines,
+            rowsep = 3pt,
+        }
+        \# & Сценарій         & Найкраще            & Обґрунтування                                                                                               \\
+        1  & Site-to-site     & IPsec               & Промисловий стандарт; апаратне прискорення; сумісність із шлюзами будь-яких виробників                      \\
+        2  & Remote worker    & IPsec або WireGuard & IPsec: корпоративна автентифікація за EAP/cert, OS-native clients; WireGuard: для невеликих teams простіший \\
+        3  & Server-to-server & WireGuard           & Компактний, з низькими накладними витратами; легко розгортається на Linux-серверах без використання PKI     \\
+        4  & Hub-and-spoke    & IPsec               & Функції підприємств: DMVPN, інтеграція маршрутизації, vendor support, централізована політика               \\
+        5  & LAN to cloud     & IPsec               & Хмарні провайдери (AWS, Azure) пропонують вже вбудовані керовані IPsec VPN шлюзи~\cite{aws_vpn_docs}        \\
+    \end{tblr}
+    \caption{Рекомендовані технології для кожного випадку}
+    \label{tab:recommendation}
+\end{table}
+
+Підсумовуючи, \textbf{IPsec} краще підходить для корпоративних середовищ та середовищ із обладнанням різних 
+виробників (сценарії 1, 4, 5), де критично важливими є сумісність, дотримання нормативних вимог та інтеграція з 
+існуючою мережевою інфраструктурою. В той час як, \textbf{WireGuard} вигідно використовувати у розгортаннях, де 
+на першому місці стоїть простота (сценарій 3), коли достатньо легкого та швидкого тунелю між відомими кінцевими 
+точками, а його фіксована криптографія усуває ризики, пов’язані з неправильною конфігурацією~\cite{wireguard_paper, wireguard_website}. 
+Для сценарію~2 підійде будь-який варіант. Вибір залежатиме від масштабу організації та наявної інфраструктури~\cite{nist_sp800_77r1}.
+
+\section{Висновки}
+\label{sec:conclusions}
+
+У цій лабораторній роботі я ознайомився і розглянув архітектуру, механізми та практичне впровадження IPsec. Аналіз 
+основних його компонентів показав чітке розділення функцій: IKEv2 відповідає за взаємну автентифікацію, 
+узгодження ключів та управління життєвим циклом SA, тоді як ESP забезпечує шифрування кожного пакета, захист цілісності 
+та захист від повторного відтворення в площині даних. Модель бази даних SPD/SAD забезпечує гнучку структуру політик, 
+а два режими роботи (transport and tunnel) призначені для різних мережевих топологій.
+
+П’ять різних ситуацій сценаріїв розгортання показали, як IPsec адаптується до різноманітних мережевих середовищ. 
+Site-to-site tunnels (сценарії 1, 4, 5) використовують тунельний режим між шлюзами для прозорого захисту 
+всього трафіку між сайтами. Remote access (сценарій 2) передбачає використання NAT-T та призначення віртуальних 
+IP-адрес. Host-to-host communication (сценарій 3) виграє від менших накладних витрат у транспортному режимі. 
+Детальний аналіз сценарію роботи віддалених співробітників (фактично, багато хто з нас так працює) показав повний 
+життєвий цикл: аутентифікацію та обмін ключами за протоколом IKEv2, інкапсуляцію в тунельному режимі ESP, активацію 
+NAT-T, а також \textit{чітку межу між тим, що захищає} IPsec (payload confidentiality, integrity, authentication), 
+\textit{і тим, що він не може вирішити} (endpoint compromise, application-layer attacks, traffic analysis).
+
+Порівняння IPsec/IKEv2 з WireGuard продемонструвало фундаментальний компроміс між налаштовуваністю IPsec, 
+широкою підтримкою виробників та корпоративними функціями, з одного боку, та простотою, продуктивністю та 
+мінімальною поверхнею атаки (minimal attack surface) у WireGuard, з іншого. Вибір між ними залежить від умов 
+розгортання, а не від абсолютної технічної переваги.
