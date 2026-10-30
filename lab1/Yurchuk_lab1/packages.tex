@@ -1,0 +1,54 @@
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\setsansfont{Tahoma}
+\setmonofont{Roboto Mono}
+\usepackage[fontsize=12pt]{fontsize}
+\usepackage{microtype}
+\usepackage[english, ukrainian]{babel}
+\usepackage[
+    top = 40pt,
+    bottom = 20pt,
+    right = 50pt,
+    left = 50pt,
+    footskip = 15pt,
+    showframe
+]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage[unicode,
+bookmarks = true,
+]{hyperref}
+\hypersetup{
+    colorlinks = true,
+    linkcolor = [RGB]{255, 3, 209},
+    breaklinks = true,
+    filecolor = magenta,
+    citecolor = green,
+    anchorcolor = black,
+    urlcolor = cyan,
+}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit, calc, decorations.pathreplacing}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{tabularray}
+\usepackage{fancyhdr}
+\usepackage[absolute,overlay]{textpos}
+\usepackage{minted}
+\setminted{
+    breaklines=true,
+    frame=single,
+    fontsize=\small,
+    linenos=true,
+    bgcolor=gray!5
+}
+
+\setminted[c]{
+    style=colorful
+}
+\usepackage[backend=biber,style=numeric,sorting=none,autolang=other]{biblatex}
+\usepackage{csquotes}
+\usepackage{cleveref}
