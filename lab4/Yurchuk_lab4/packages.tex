@@ -1,0 +1,86 @@
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\setsansfont{Tahoma}
+\setmonofont{Roboto Mono}
+\usepackage[fontsize=12pt]{fontsize}
+\usepackage{microtype}
+\usepackage[english, ukrainian]{babel}
+\usepackage[
+    top = 40pt,
+    bottom = 20pt,
+    right = 50pt,
+    left = 50pt,
+    footskip = 15pt,
+    %showframe
+]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage[unicode,
+bookmarks = true,
+]{hyperref}
+\hypersetup{
+    colorlinks = true,
+    linkcolor = [RGB]{255, 3, 209},
+    breaklinks = true,
+    filecolor = magenta,
+    citecolor = green,
+    anchorcolor = black,
+    urlcolor = cyan,
+}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, backgrounds, shapes.symbols, shapes.geometric, fit, calc, decorations.pathreplacing, decorations.pathmorphing}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{tabularray}
+\usepackage{fancyhdr}
+\usepackage[absolute,overlay]{textpos}
+\usepackage{minted}
+\setminted{
+    breaklines=true,
+    frame=single,
+    fontsize=\small,
+    linenos=true,
+    bgcolor=gray!5
+}
+
+\setminted[c]{
+    style=colorful
+}
+\usepackage[backend=biber,style=numeric,sorting=none,autolang=other]{biblatex}
+\usepackage{csquotes}
+\usepackage{cleveref}
+\definecolor{headBlue}{RGB}{41, 98, 160}
+\definecolor{okGreen}{RGB}{34, 139, 34}
+\definecolor{badRed}{RGB}{200, 40, 40}
+\definecolor{warnOrange}{RGB}{230, 126, 34}
+\definecolor{softGray}{RGB}{235, 235, 235}
+
+\tikzset{
+    actor/.style = {
+        draw = headBlue, very thick, rounded corners = 4pt, fill = headBlue!8,
+        minimum width = 2.4cm, minimum height = 1.2cm, align = center, font = \small
+    },
+    evil/.style = {
+        draw = badRed, very thick, rounded corners = 4pt, fill = badRed!8,
+        minimum width = 2.3cm, minimum height = 1.1cm, align = center, font = \small
+    },
+    flow/.style  = {-{Stealth[length = 2.5mm]}, thick, headBlue!80!black},
+    back/.style  = {-{Stealth[length = 2.5mm]}, thick, okGreen!80!black},
+    atk/.style   = {-{Stealth[length = 2.5mm]}, thick, badRed, dashed},
+    lbl/.style   = {font = \scriptsize, align = center},
+    note/.style  = {
+        draw = gray, fill = softGray, rounded corners = 2pt, font = \scriptsize,
+        align = left, inner sep = 4pt
+    },
+    db/.style    = {
+        cylinder, shape border rotate = 90, aspect = 0.25, draw, very thick,
+        minimum width = 2.4cm, minimum height = 1.5cm, align = center, font = \scriptsize
+    },
+    keybox/.style = {
+        draw, thick, rounded corners = 2pt, minimum width = 1.15cm, minimum height = 0.7cm,
+        font = \scriptsize, align = center
+    },
+}
